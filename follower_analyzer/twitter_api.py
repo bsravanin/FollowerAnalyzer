@@ -9,6 +9,7 @@ import time
 import twitter
 
 from follower_analyzer import db
+from twitter.ratelimit import EndpointRateLimit
 
 
 CREDS_KEYS = {'consumer_key', 'consumer_secret', 'access_token_key', 'access_token_secret'}
@@ -39,14 +40,16 @@ class Progress(object):
         self.progress_json = progress_json
         self.cursor = progress_dict.get('cursor', -1)
         self.follower_ids = progress_dict.get('follower_ids', [])
-        self.last_get_follower_ids = progress_dict.get('last_get_follower_ids', 0)
-        self.last_users_lookup = progress_dict.get('last_users_lookup', 0)
+        self.get_follower_ids_rate_limits = \
+            EndpointRateLimit(*progress_dict.get('get_follower_ids_rate_limits', [15, 15, 0]))
+        self.users_lookup_rate_limits = \
+            EndpointRateLimit(*progress_dict.get('users_lookup_rate_limits', [900, 150, 0]))
 
     def save(self):
         progress_dict = {'cursor': self.cursor,
                          'follower_ids': self.follower_ids,
-                         'last_get_follower_ids': self.last_get_follower_ids,
-                         'last_users_lookup': self.last_users_lookup}
+                         'get_follower_ids_rate_limits': self.get_follower_ids_rate_limits,
+                         'users_lookup_rate_limits': self.users_lookup_rate_limits}
         with open(self.progress_json, 'w') as pfd:
             json.dump(progress_dict, pfd)
 
@@ -54,15 +57,14 @@ class Progress(object):
 def save_followers(api: twitter.Api, db_conn: sqlite3.Connection, username: str, progress: Progress, exit_marker: str):
     """Save followers of a Twitter user to DB, keeping track of the progress."""
     now = time.time()
-    get_follower_ids_is_rate_limited = now - progress.last_get_follower_ids < 900
-    users_lookup_is_rate_limited = now - progress.last_users_lookup < 900
+    get_follower_ids_is_rate_limited = now > progress.get_follower_ids_rate_limits.reset
+    users_lookup_is_rate_limited = now > progress.users_lookup_rate_limits.reset
     while True:
         if os.path.exists(exit_marker):
             logging.info('Found exit marker file %s. Stopping.', exit_marker)
             break
         elif not users_lookup_is_rate_limited and len(progress.follower_ids) >= 100:
-            logging.info('Getting users.')
-            now = time.time()
+            logging.debug('Getting users.')
             users = None
             try:
                 users = api.UsersLookup(user_id=progress.follower_ids[:100])
@@ -71,32 +73,37 @@ def save_followers(api: twitter.Api, db_conn: sqlite3.Connection, username: str,
             except twitter.error.TwitterError:
                 logging.exception('Hit rate-limit while getting users.')
                 users_lookup_is_rate_limited = True
+                progress.users_lookup_rate_limits = api.CheckRateLimit('https://api.twitter.com/1.1/users/lookup.json')
             except Exception as e:
                 logging.exception('Error writing data to DB. Saving current data to users.dat for investigation.')
                 with open('users.dat', 'wb') as pfd:
                     pickle.dump(users, pfd)
                 raise e
             finally:
-                progress.last_users_lookup = now
                 progress.save()
         elif get_follower_ids_is_rate_limited:
-            logging.info('Hit rate-limit for getting follower IDs. Sleeping 15 minutes.')
-            time.sleep(900)
+            if len(progress.follower_ids) >= 100 and \
+                    progress.get_follower_ids_rate_limits.reset > progress.users_lookup_rate_limits.reset:
+                closest_rate_limit_reset = progress.users_lookup_rate_limits.reset
+            else:
+                closest_rate_limit_reset = progress.get_follower_ids_rate_limits.reset
+            duration = max(int(closest_rate_limit_reset - time.time()) + 2, 0)
+            logging.info('Hit rate-limits. Sleeping %s seconds.', duration)
+            time.sleep(duration)
             get_follower_ids_is_rate_limited = False
             users_lookup_is_rate_limited = False
         elif progress.cursor != 0:
-            logging.info('Getting follower IDs.')
-            now = time.time()
+            logging.debug('Getting follower IDs.')
             try:
                 progress.cursor, _previous_cursor, result = \
                         api.GetFollowerIDsPaged(screen_name=username, stringify_ids=True, cursor=progress.cursor)
                 progress.follower_ids.extend(result)
-                progress.save()
             except twitter.error.TwitterError:
                 logging.exception('Hit rate-limit while getting follower IDs.')
                 get_follower_ids_is_rate_limited = True
+                progress.get_follower_ids_rate_limits = \
+                    api.CheckRateLimit('https://api.twitter.com/1.1/followers/ids.json')
             finally:
-                progress.last_get_follower_ids = now
                 progress.save()
         else:
             logging.info('Exiting. Rate-limit %s for getting follower IDs, %s for getting users, cursor: %s, '
