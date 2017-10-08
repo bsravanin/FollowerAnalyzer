@@ -1,0 +1,8 @@
+.idea
+.tox
+*.db*
+*.egg-info
+*.json*
+*.pyc
+*.swp
+__pycache__
