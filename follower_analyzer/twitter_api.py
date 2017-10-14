@@ -63,7 +63,8 @@ def save_followers(api: twitter.Api, db_conn: sqlite3.Connection, username: str,
         if os.path.exists(exit_marker):
             logging.info('Found exit marker file %s. Stopping.', exit_marker)
             break
-        elif not users_lookup_is_rate_limited and len(progress.follower_ids) >= 100:
+        elif (len(progress.follower_ids) >= 100 or (progress.cursor == 0 and len(progress.follower_ids) > 0)) \
+                and not users_lookup_is_rate_limited:
             logging.debug('Getting users.')
             users = None
             try:
