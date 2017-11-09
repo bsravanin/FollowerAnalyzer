@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import time
 
 from follower_analyzer import db
 from follower_analyzer import twitter_api
@@ -19,6 +20,8 @@ def _create_parser():
                         help='Path to DB to be used. Create if necessary. Defaults to ./twitter.db.')
     parser.add_argument('-e', '--exit_marker', action='store', default='./exit_follower_analyzer',
                         help='Path to a file that is checked for premature exit. Defaults to ./exit_follower_analyzer.')
+    parser.add_argument('-i', '--ignore_exceptions', action='store_true',
+                        help='Ignore exceptions. Useful for long unsupervised sessions.')
     parser.add_argument('-p', '--progress', action='store', default='.progress.json',
                         help='Path to JSON containing previous progress to pickup from. Defaults to ./.progress.json.')
     parser.add_argument('-u', '--username', action='store', required=True,
@@ -33,8 +36,17 @@ def main():
 
     progress = twitter_api.Progress(args.progress)
     twitter_conn = twitter_api.get_conn(args.credentials)
-    db_conn = db.get_conn(args.dbpath)
-    twitter_api.save_followers(twitter_conn, db_conn, args.username, progress, args.exit_marker)
+    db_conn = db.get_conn(args.dbpath, read_only=False)
+    while True:
+        try:
+            twitter_api.save_followers(twitter_conn, db_conn, args.username, progress, args.exit_marker)
+            break
+        except:
+            if args.ignore_exceptions:
+                logging.info('Caught an unknown exception. Will retry after sleeping for 300s.')
+                time.sleep(300)
+            else:
+                raise
 
 
 if __name__ == '__main__':

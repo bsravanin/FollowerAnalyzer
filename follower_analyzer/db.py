@@ -86,12 +86,16 @@ def _create_table(conn: sqlite3.Connection, table: str, schema: OrderedDict):
     conn.execute('CREATE TABLE IF NOT EXISTS {} ({})'.format(table, ', '.join(schema_parts)))
 
 
-def get_conn(db_path: str) -> sqlite3.Connection:
+def get_conn(db_path: str, read_only: bool = True) -> sqlite3.Connection:
     """Get a connection to the DB in the given path. Create schema if necessary."""
     if not os.path.isfile(db_path):
         logging.warning('Could not find an existing DB at %s. Creating one...', db_path)
 
-    conn = sqlite3.connect(db_path)
+    if read_only:
+        conn = sqlite3.connect('file:{}?mode=ro'.format(db_path), uri=True)
+    else:
+        conn = sqlite3.connect(db_path)
+
     _create_table(conn, 'users', USER_COLUMNS)
     _create_table(conn, 'statuses', STATUS_COLUMNS)
     conn.commit()
