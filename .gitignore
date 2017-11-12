@@ -1,8 +1,10 @@
 .idea
 .tox
+*.dat
 *.db*
 *.egg-info
 *.json*
 *.pyc
 *.swp
+*.xlsx
 __pycache__
