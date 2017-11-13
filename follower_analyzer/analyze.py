@@ -2,6 +2,7 @@
 import logging
 import os
 import pickle
+import re
 import time
 
 from collections import Counter
@@ -17,6 +18,7 @@ from follower_analyzer.db2 import USER_COLUMNS2
 OBAMA = 'BarackObama'
 TRUMP = 'realDonaldTrump'
 BOTH = 'BOTH'
+STRING_SUFFIXED_WITH_DIGITS_REGEX = re.compile(r'(.+?)(\d+)$')
 
 
 def _save_data(fpath: str, obj: object):
@@ -30,7 +32,7 @@ def collect_counters(dbpath: str, max_iterations: int=1000, bucket: int=10, quer
     statuses = {BOTH: set(), TRUMP: set()}
     conn = db2.get_conn(dbpath)
     cursor = conn.cursor()
-    cursor.execute('select * from users')
+    cursor.execute('SELECT * FROM users')
     index = 0
     while True:
         if index == max_iterations:
@@ -91,7 +93,7 @@ def collect_counters(dbpath: str, max_iterations: int=1000, bucket: int=10, quer
         if len(rows) < query_limit:
             break
 
-    cursor.execute('select * from statuses')
+    cursor.execute('SELECT * FROM statuses')
     index = 0
     while True:
         if index == max_iterations:
@@ -217,3 +219,60 @@ def write_report(merged_counter_path: str, report_path: str):
             index += 1
 
     workbook.save(report_path)
+
+
+def create_status_following_index(dbpath: str, index_path: str):
+    start = time.time()
+    conn = db2.get_conn(dbpath)
+    cursor = conn.cursor()
+    statuses = {BOTH: set(), TRUMP: set()}
+    for name in [BOTH, TRUMP]:
+        for column in ['status', 'previous_status']:
+            cursor.execute("SELECT {} FROM users WHERE {} != '' AND following = '{}'".format(column, column, name))
+            statuses[name] |= {row[0] for row in cursor.fetchall()}
+    _save_data(index_path, statuses)
+    logging.debug('Creating index of status to following (Trump/Both) for %s took %s seconds using %s path.',
+                  os.path.basename(dbpath), time.time() - start, 'fast' if 'sravan' in dbpath else 'slow')
+
+
+def get_status_sources(dbpath: str, status_following_index_path: str, sources: defaultdict):
+    start = time.time()
+    statuses = _load_data(status_following_index_path)
+    with db2.get_conn(dbpath) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT id_str, source FROM statuses')
+        for row in cursor.fetchall():
+            source = row['source']
+            if row['id_str'] in statuses[BOTH]:
+                sources[source][OBAMA] += 1
+                sources[source][TRUMP] += 1
+                sources[source][BOTH] += 1
+            elif row['id_str'] in statuses[TRUMP]:
+                sources[source][TRUMP] += 1
+            else:
+                sources[source][OBAMA] += 1
+    logging.debug('Getting status sources from %s took %s seconds using %s path.',
+                  os.path.basename(dbpath), time.time() - start, 'fast' if 'sravan' in dbpath else 'slow')
+    return sources
+
+
+def create_screen_name_index(dbpath: str, screen_name_index_path: str):
+    """NOTE: This function is treating the names as disjoint collections, the way stored in DB, to save on space."""
+    start = time.time()
+    with db2.get_conn(dbpath) as conn:
+        cursor = conn.cursor()
+        screen_names = {}
+        for name in [OBAMA, TRUMP, BOTH]:
+            cursor.execute('SELECT screen_name FROM users WHERE following = "{}"'.format(name))
+            screen_names[name] = [row[0] for row in cursor.fetchall()]
+        _save_data(screen_name_index_path, screen_names)
+    logging.debug('Creating screen name index for %s took %s seconds using %s path.',
+                  os.path.basename(dbpath), time.time() - start, 'fast' if 'sravan' in dbpath else 'slow')
+
+
+def count_screen_names_ending_in_digits(screen_name_index_path: str, screen_names: dict):
+    for name, value in _load_data(screen_name_index_path).items():
+        for screen_name in value:
+            match = re.match(STRING_SUFFIXED_WITH_DIGITS_REGEX, screen_name)
+            if match is not None:
+                screen_names[name][match.groups()[0].lower()] += 1
