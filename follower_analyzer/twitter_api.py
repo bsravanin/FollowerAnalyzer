@@ -40,16 +40,22 @@ class Progress(object):
         self.progress_json = progress_json
         self.cursor = progress_dict.get('cursor', -1)
         self.follower_ids = progress_dict.get('follower_ids', [])
+        self.hashtag_max_ids = progress_dict.get('max_ids', {})
+
         self.get_follower_ids_rate_limits = \
             EndpointRateLimit(*progress_dict.get('get_follower_ids_rate_limits', [15, 15, 0]))
         self.users_lookup_rate_limits = \
             EndpointRateLimit(*progress_dict.get('users_lookup_rate_limits', [900, 150, 0]))
+        self.search_rate_limits = \
+            EndpointRateLimit(*progress_dict.get('search_rate_limits', [180, 180, 0]))
 
     def save(self):
         progress_dict = {'cursor': self.cursor,
                          'follower_ids': self.follower_ids,
+                         'hashtag_max_ids': self.hashtag_max_ids,
                          'get_follower_ids_rate_limits': self.get_follower_ids_rate_limits,
-                         'users_lookup_rate_limits': self.users_lookup_rate_limits}
+                         'users_lookup_rate_limits': self.users_lookup_rate_limits,
+                         'search_rate_limits': self.search_rate_limits}
         with open(self.progress_json, 'w') as pfd:
             json.dump(progress_dict, pfd)
 
@@ -114,3 +120,50 @@ def save_followers(api: twitter.Api, db_conn: sqlite3.Connection, username: str,
                          progress.cursor,
                          len(progress.follower_ids))
             break
+
+
+def search(api: twitter.Api, db_conn: sqlite3.Connection, hashtags: list, progress: Progress, exit_marker: str,
+           result_type: str='popular'):
+    """Search popular tweets with given hashtags and save them in their respective DBs, keeping track of progress."""
+    now = time.time()
+    search_is_rate_limited = now > progress.search_rate_limits.reset
+    index = 0
+    while True:
+        if len(hashtags) == 0:
+            logging.info('No hashtags to search. Stopping.')
+            break
+        elif os.path.exists(exit_marker):
+            logging.info('Found exit marker file %s. Stopping.', exit_marker)
+            break
+        elif not search_is_rate_limited:
+            if index >= len(hashtags) or index < 0:
+                index %= len(hashtags)
+            current_hashtag = hashtags[index]
+            index += 1
+            logging.debug('Searching Twitter for %s.', current_hashtag)
+            try:
+                tweets = api.GetSearch(count=100, result_type=result_type, term=current_hashtag,
+                                       max_id=progress.hashtag_max_ids.get(current_hashtag),
+                                       include_entities=True)
+                db.save_tweets(db_conn, tweets)
+
+                if len(tweets) < 100:
+                    logging.info('Retrieved all %s tweets for hashtag %s. Removing it from list.',
+                                 result_type, current_hashtag)
+                    hashtags.remove(current_hashtag)
+                    index -= 1
+
+                if len(tweets) > 0:
+                    progress.hashtag_max_ids[current_hashtag] = tweets[-1].id - 1
+            except twitter.error.TwitterError:
+                logging.exception('Hit rate-limit while searching Twitter.')
+                search_is_rate_limited = True
+                progress.search_rate_limits = api.CheckRateLimit('https://api.twitter.com/1.1/search/tweets.json')
+            finally:
+                progress.save()
+        elif search_is_rate_limited:
+            closest_rate_limit_reset = progress.search_rate_limits.reset
+            duration = max(int(closest_rate_limit_reset - time.time()) + 2, 0)
+            logging.info('Hit rate-limits. Sleeping %s seconds.', duration)
+            time.sleep(duration)
+            search_is_rate_limited = False

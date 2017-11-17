@@ -6,7 +6,7 @@ import sqlite3
 from collections import OrderedDict
 from typing import List
 
-from twitter.models import User
+from twitter.models import User, Status
 
 
 USER_COLUMNS = OrderedDict({
@@ -66,6 +66,17 @@ STATUS_COLUMNS = OrderedDict({
     'withheld_scope': str,
 })
 
+FULL_STATUS_COLUMNS = STATUS_COLUMNS.copy()
+FULL_STATUS_COLUMNS['favorite_count'] = int
+FULL_STATUS_COLUMNS['favorited'] = bool
+FULL_STATUS_COLUMNS['full_text'] = str
+FULL_STATUS_COLUMNS['media'] = str
+FULL_STATUS_COLUMNS['quoted_status_id_str'] = str
+FULL_STATUS_COLUMNS['retweet_count'] = int
+FULL_STATUS_COLUMNS['retweeted'] = bool
+FULL_STATUS_COLUMNS['retweeted_status_id_str'] = str
+FULL_STATUS_COLUMNS['user_id_str'] = str
+
 
 def _create_table(conn: sqlite3.Connection, table: str, schema: OrderedDict):
     """Create a table in the DB using the given schema."""
@@ -86,7 +97,7 @@ def _create_table(conn: sqlite3.Connection, table: str, schema: OrderedDict):
     conn.execute('CREATE TABLE IF NOT EXISTS {} ({})'.format(table, ', '.join(schema_parts)))
 
 
-def get_conn(db_path: str, read_only: bool = True) -> sqlite3.Connection:
+def get_conn(db_path: str, read_only: bool=True, full_status: bool=False) -> sqlite3.Connection:
     """Get a connection to the DB in the given path. Create schema if necessary."""
     if not os.path.isfile(db_path):
         logging.warning('Could not find an existing DB at %s. Creating one...', db_path)
@@ -95,10 +106,13 @@ def get_conn(db_path: str, read_only: bool = True) -> sqlite3.Connection:
         conn = sqlite3.connect('file:{}?mode=ro'.format(db_path), uri=True)
     else:
         conn = sqlite3.connect(db_path)
+        _create_table(conn, 'users', USER_COLUMNS)
+        if full_status:
+            _create_table(conn, 'statuses', FULL_STATUS_COLUMNS)
+        else:
+            _create_table(conn, 'statuses', STATUS_COLUMNS)
+        conn.commit()
 
-    _create_table(conn, 'users', USER_COLUMNS)
-    _create_table(conn, 'statuses', STATUS_COLUMNS)
-    conn.commit()
     return conn
 
 
@@ -163,3 +177,42 @@ def save_users(conn: sqlite3.Connection, users: List[User]):
     _insert_rows(conn, 'users', USER_COLUMNS, user_rows)
     _insert_rows(conn, 'statuses', STATUS_COLUMNS, status_rows)
     conn.commit()
+
+
+def save_tweets(conn: sqlite3.Connection, statuses: List[Status]):
+    status_rows = []
+    users = []
+    while True:
+        if len(statuses) == 0:
+            break
+        status = statuses.pop(0)
+        if isinstance(status.hashtags, list):
+            status.hashtags = [h.text for h in status.hashtags]
+
+        if status.quoted_status is not None:
+            statuses.append(status.quoted_status)
+
+        if status.retweeted_status is not None:
+            statuses.append(status.retweeted_status)
+            status.retweeted_status_id_str = status.retweeted_status.id_str
+        else:
+            status.retweeted_status_id_str = ''
+
+        if status.user is not None:
+            users.append(status.user)
+            status.user_id_str = str(status.user.id)
+
+        row = []
+        for key, value in FULL_STATUS_COLUMNS.items():
+            _normalize_attr(status, key)
+            if key in ['in_reply_to_status_id', 'in_reply_to_user_id']:
+                row.append(str(getattr(status, key)))
+            else:
+                row.append(getattr(status, key))
+        status_rows.append(tuple(row))
+
+    _insert_rows(conn, 'statuses', FULL_STATUS_COLUMNS, status_rows)
+    conn.commit()
+
+    if len(users) > 0:
+        save_users(conn, users)
