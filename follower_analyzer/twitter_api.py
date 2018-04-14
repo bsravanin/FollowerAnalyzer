@@ -1,4 +1,6 @@
-"""Layer to fetch data from Twitter."""
+"""Layer to fetch data from Twitter. Requires credentials from a Twitter app with at least read privileges. Currently
+only supports a single credential pair. Should be easy and useful to extend it to support an arbitrary number of
+credential pairs and rotate across them to minimize sleeps around rate-limits."""
 import json
 import logging
 import os
@@ -29,7 +31,8 @@ def get_conn(creds_json: str) -> twitter.Api:
 
 
 class Progress(object):
-    """Class to keep track of progress, backed to a JSON file."""
+    """Class to keep track of progress made in collecting data about followers of a user, backed to a JSON file.
+    This is useful to resume from any cancellations of the script before it completes."""
     def __init__(self, progress_json: str):
         progress_dict = {}
         if os.path.isfile(progress_json):
@@ -55,7 +58,11 @@ class Progress(object):
 
 
 def save_followers(api: twitter.Api, db_conn: sqlite3.Connection, username: str, progress: Progress, exit_marker: str):
-    """Save followers of a Twitter user to DB, keeping track of the progress."""
+    """Save followers of a Twitter user to DB, keeping track of the progress. It fetches the list of user_ids of
+    followers, and then using those user_ids the profiles of those followers (includes the most recently posted
+    tweet if public), while regularly checking rate-limits so as to slow down in advance (using sleeps) instead
+    of actually hitting those limits. An exit marker is used to gracefully exit before completion, to be later resumed
+    from saved Progress."""
     now = time.time()
     get_follower_ids_is_rate_limited = now > progress.get_follower_ids_rate_limits.reset
     users_lookup_is_rate_limited = now > progress.users_lookup_rate_limits.reset

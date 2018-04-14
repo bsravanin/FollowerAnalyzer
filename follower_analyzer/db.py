@@ -9,6 +9,7 @@ from typing import List
 from twitter.models import User
 
 
+# Based on python-twitter's User model, with modifications around what and how we want to store the data in SQLite.
 USER_COLUMNS = OrderedDict({
     'contributors_enabled': bool,
     'created_at': str,
@@ -45,6 +46,7 @@ USER_COLUMNS = OrderedDict({
     'withheld_scope': str,
 })
 
+# Based on python-twitter's Status model, with modifications around what and how we want to store the data in SQLite.
 STATUS_COLUMNS = OrderedDict({
     'contributors': str,
     'coordinates': str,
@@ -68,7 +70,7 @@ STATUS_COLUMNS = OrderedDict({
 
 
 def _create_table(conn: sqlite3.Connection, table: str, schema: OrderedDict):
-    """Create a table in the DB using the given schema."""
+    """Create a table in the DB using the given schema if it doesn't already exist."""
     schema_parts = []
     for key, value in schema.items():
         if value == int:
@@ -113,13 +115,17 @@ def _normalize_attr(obj: object, key: str):
 
 
 def _insert_rows(conn: sqlite3.Connection, table: str, schema: OrderedDict, rows: List[tuple]):
-    """Insert a list of rows into the DB's table using the given schema."""
+    """Insert a list of rows into the DB's table using the given schema. Does a replace instead of an insert because
+    resuming from previous cancellations as well as sharing the DB for storing followers of multiple users would lead
+    to duplicate IDs. In addition, the most recent data is being treated as the current/correct data."""
     if len(rows) > 0:
         col_names = ', '.join(["'{}'".format(key) for key in schema])
         col_values = ', '.join(['?'] * len(schema))
         try:
             conn.executemany('REPLACE INTO {} ({}) VALUES ({})'.format(table, col_names, col_values), rows)
         except sqlite3.InterfaceError:
+            # To debug some bug that was happening early on. In general, API calls are considered to be more expensive
+            # than DB calls.
             for row in rows:
                 try:
                     conn.execute('REPLACE INTO {} ({}) VALUES ({})'.format(table, col_names, col_values), row)
@@ -129,7 +135,8 @@ def _insert_rows(conn: sqlite3.Connection, table: str, schema: OrderedDict, rows
 
 
 def save_users(conn: sqlite3.Connection, users: List[User]):
-    """Save a list of user JSONs in the DB."""
+    """Save a list of user JSONs in the DB. The JSON includes the most recent publicly available tweet by the user,
+    so results in writing to both users and statuses tables."""
     user_rows = []
     status_rows = []
     for user in users:

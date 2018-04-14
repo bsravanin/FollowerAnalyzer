@@ -1,4 +1,14 @@
-"""Layer to read Twitter data from DB."""
+"""This module is specific to the analysis we were doing. We first started with just one user, storing data about all
+followers of one user in realDonaldTrump.db. Along similar lines we created a BarackObama.db. Both these DBs had a
+large but unknown quantity of overlap. The sheer size of the DBs also resulted in a well-documented performance
+limitation for both reads and writes.
+
+This module was created with an aim of consolidating the data in both these DBs, while also splitting them by YYYYMM
+(based on when the follower's account was created). The only difference from db.py is in the users table:
+2 additional columns, one to keep track of previous_status (because combining users in two DBs with the same user_id
+could result in at most 2 statuses) and another to keep track of whether the user follows only realDonaldTrump,
+only BarackObama, or both.
+"""
 
 import gc
 import json
@@ -58,14 +68,21 @@ def _executemany(conn: sqlite3.Connection, stmt: str, rows: list):
                 conn.execute(stmt.replace('UPDATE ', 'UPDATE OR IGNORE '), row)
 
 
-def _parallel_commit(args: dict):
+def _yyyymm_commit(args: dict):
+    """The consolidated data is being written into separate DBs like twitter_YYYYMM.db. The data is already split
+    into batches separated by YYYYMM key before calling this method. This whole process is done twice: first
+    while consolidating data from realDonaldTrump.db and then from BarackObama.db. Consolidating data from the former
+    is easy, in that it only involves inserts with no key clashes. Consolidating data from the latter involves
+    identifying whether the follower is fully new (only follows BarackObama), else whether or not they have an
+    additional status (requires updating that they follow both, and potentially the previous_status column).
+    """
     start = time.time()
     root_dir = args['root_dir']
-    year = args['year']
+    yyyymm = args['year']
     user_rows = args['user_rows']
     status_rows = args['status_rows']
 
-    with open(os.path.join(root_dir, 'twitter_{}.index'.format(year)), 'rb') as pfd:
+    with open(os.path.join(root_dir, 'twitter_{}.index'.format(yyyymm)), 'rb') as pfd:
         index = pickle.load(pfd)
 
     new_user_rows = []
@@ -87,7 +104,7 @@ def _parallel_commit(args: dict):
             if new_status != '':
                 new_status_rows.append(status_rows_dict[new_status])
 
-    with get_conn(os.path.join(root_dir, 'twitter_{}.db'.format(year))) as conn:
+    with get_conn(os.path.join(root_dir, 'twitter_{}.db'.format(yyyymm))) as conn:
         conn.execute('pragma synchronous = OFF')
         _executemany(conn, USER_INSERT_STMT, new_user_rows)
         _executemany(conn, USER_UPDATE_STMT_SAME_STATUS, existing_user_rows_with_same_status)
@@ -98,12 +115,12 @@ def _parallel_commit(args: dict):
 
         conn.commit()
     logging.debug('Inserting and committing %s user rows and %s status rows for twitter_%s.db took %s seconds.',
-                  len(user_rows), len(status_rows), year, time.time() - start)
+                  len(user_rows), len(status_rows), yyyymm, time.time() - start)
 
 
 def _parallel_commit_worker(pool_args_list: list):
     for args in pool_args_list:
-        _parallel_commit(args)
+        _yyyymm_commit(args)
 
 
 def _commit(write_dirs: list, user_rows_by_years: defaultdict, status_rows_by_years: defaultdict,
@@ -129,6 +146,12 @@ def _commit(write_dirs: list, user_rows_by_years: defaultdict, status_rows_by_ye
 
 
 def populate_new_dbs(root_dir: str, username: str, offset: int, write_dirs: list=None):
+    """The entry point of the consolidation + splitting process. For each DB, in batches, it fetches user and status
+    rows, divides them into buckets of YYYYMMM (follower's creation date), and periodically commits them to the
+    respective twitter_YYYYMM.db in parallel. A .tunables.json is used to tweak the batch size for fetching data and
+    the threshold size for committing data on the fly. An exit marker is used to gracefully exit in the middle of
+    the process. There is no progress saved, so retries start from scratch and the SQL statements are expected to
+    handle overwriting."""
     global_user_row_count = 0
     query_limit = 100000
     commit_threshold = 10000
