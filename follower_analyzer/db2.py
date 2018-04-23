@@ -27,34 +27,17 @@ from follower_analyzer import db
 USER_COLUMNS2 = db.USER_COLUMNS.copy()
 USER_COLUMNS2['previous_status'] = str
 USER_COLUMNS2['following'] = str
-USER_INSERT_STMT = 'INSERT INTO {} ({}) VALUES ({})'.format(
-    'users',
-    ', '.join(["'{}'".format(key) for key in USER_COLUMNS2]),
-    ', '.join(['?'] * len(USER_COLUMNS2)))
+USER_INSERT_STMT = db._insert_stmt('users', USER_COLUMNS2)
 USER_UPDATE_STMT_SAME_STATUS = 'UPDATE users SET following = "BOTH" WHERE id_str = ?'
 USER_UPDATE_STMT_NEW_STATUS = 'UPDATE users SET following = "BOTH", previous_status = ? WHERE id_str = ?'
 
-STATUS_INSERT_STMT = 'INSERT INTO {} ({}) VALUES ({})'.format(
-    'statuses',
-    ', '.join(["'{}'".format(key) for key in db.STATUS_COLUMNS]),
-    ', '.join(['?'] * len(db.STATUS_COLUMNS)))
+STATUS_INSERT_STMT = db._insert_stmt('statuses', db.STATUS_COLUMNS)
 
 
-def get_conn(db_path: str, read_only: bool = False) -> sqlite3.Connection:
+def get_conn(db_path: str, read_only: bool = True) -> sqlite3.Connection:
     """Get a connection to the DB in the given path. Create schema if necessary."""
-    if not os.path.isfile(db_path):
-        logging.warning('Could not find an existing DB at %s. Creating one...', db_path)
-
-    if read_only:
-        conn = sqlite3.connect('file:{}?mode=ro'.format(db_path), uri=True)
-    else:
-        conn = sqlite3.connect(db_path)
-        db._create_table(conn, 'users', USER_COLUMNS2)
-        db._create_table(conn, 'statuses', db.STATUS_COLUMNS)
-        conn.commit()
-
-    conn.row_factory = sqlite3.Row
-    return conn
+    return db._get_conn(db_path, {'users': USER_COLUMNS2, 'statuses': db.STATUS_COLUMNS}, row_factory=sqlite3.Row,
+                        read_only=read_only)
 
 
 def _executemany(conn: sqlite3.Connection, stmt: str, rows: list):
@@ -104,7 +87,7 @@ def _yyyymm_commit(args: dict):
             if new_status != '':
                 new_status_rows.append(status_rows_dict[new_status])
 
-    with get_conn(os.path.join(root_dir, 'twitter_{}.db'.format(yyyymm))) as conn:
+    with get_conn(os.path.join(root_dir, 'twitter_{}.db'.format(yyyymm)), read_only=False) as conn:
         conn.execute('pragma synchronous = OFF')
         _executemany(conn, USER_INSERT_STMT, new_user_rows)
         _executemany(conn, USER_UPDATE_STMT_SAME_STATUS, existing_user_rows_with_same_status)
@@ -137,8 +120,8 @@ def _commit(write_dirs: list, user_rows_by_years: defaultdict, status_rows_by_ye
                                                'root_dir': write_dirs[bucket_id]})
 
     if len(years) > 0:
-        pool = ThreadPool(len(write_dirs))
-        pool.map(_parallel_commit_worker, pool_args_lists)
+        with ThreadPool(len(write_dirs)) as pool:
+            pool.map(_parallel_commit_worker, pool_args_lists)
         for year in years:
             user_rows_by_years[year].clear()
             status_rows_by_years[year].clear()

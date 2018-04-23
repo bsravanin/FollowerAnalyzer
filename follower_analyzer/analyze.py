@@ -5,8 +5,6 @@ import pickle
 import re
 import time
 
-import requests
-
 from collections import Counter
 from collections import OrderedDict
 from collections import defaultdict
@@ -295,23 +293,6 @@ def get_status_sources(dbpath: str, status_following_index_path: str, sources: d
     logging.debug('Getting status sources from %s took %s seconds.',
                   os.path.basename(dbpath), time.time() - start)
     return sources
-
-
-def unshorten_url(url: str) -> [str, None]:
-    """Unshortens a URL following https://stackoverflow.com/a/28918160. Also strips the URL of prefixes like
-    http://, https://, www., and suffix '/'."""
-    session = requests.Session()
-    try:
-        return session.head(url, allow_redirects=True, timeout=5).url.replace('http://', '')\
-                      .replace('https://', '').replace('www.', '').rstrip('/')
-    except requests.exceptions.Timeout:
-        return 'Timeout'
-    except requests.exceptions.TooManyRedirects:
-        return 'TooManyRedirects'
-    except requests.exceptions.ConnectionError:
-        return 'ConnectionError'
-    except:
-        return None
 
 
 def add_sources_sheet(sources_path: str, report_path: str):

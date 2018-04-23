@@ -88,7 +88,7 @@ def _create_table(conn: sqlite3.Connection, table: str, schema: OrderedDict):
     conn.execute('CREATE TABLE IF NOT EXISTS {} ({})'.format(table, ', '.join(schema_parts)))
 
 
-def get_conn(db_path: str, read_only: bool = True) -> sqlite3.Connection:
+def _get_conn(db_path: str, schema: dict, row_factory=None, read_only: bool = True) -> sqlite3.Connection:
     """Get a connection to the DB in the given path. Create schema if necessary."""
     if not os.path.isfile(db_path):
         logging.warning('Could not find an existing DB at %s. Creating one...', db_path)
@@ -97,11 +97,19 @@ def get_conn(db_path: str, read_only: bool = True) -> sqlite3.Connection:
         conn = sqlite3.connect('file:{}?mode=ro'.format(db_path), uri=True)
     else:
         conn = sqlite3.connect(db_path)
+        for table, defn in schema.items():
+            _create_table(conn, table, defn)
+        conn.commit()
 
-    _create_table(conn, 'users', USER_COLUMNS)
-    _create_table(conn, 'statuses', STATUS_COLUMNS)
-    conn.commit()
+    if row_factory is not None:
+        conn.row_factory = sqlite3.Row
+
     return conn
+
+
+def get_conn(db_path: str, read_only: bool = True) -> sqlite3.Connection:
+    return _get_conn(db_path, {'users': USER_COLUMNS, 'statuses': STATUS_COLUMNS}, row_factory=None,
+                     read_only=read_only)
 
 
 def _normalize_attr(obj: object, key: str):
@@ -112,6 +120,13 @@ def _normalize_attr(obj: object, key: str):
             setattr(obj, key, '')
         elif isinstance(attr, dict) or isinstance(attr, list):
             setattr(obj, key, str(attr))
+
+
+def _insert_stmt(table: str, columns: OrderedDict):
+    return 'INSERT INTO {} ({}) VALUES ({})'.format(
+        table,
+        ', '.join(["'{}'".format(key) for key in columns]),
+        ', '.join(['?'] * len(columns)))
 
 
 def _insert_rows(conn: sqlite3.Connection, table: str, schema: OrderedDict, rows: List[tuple]):
